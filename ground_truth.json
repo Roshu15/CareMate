@@ -1,0 +1,23 @@
+{
+  "sample_prescription.jpg": {
+    "type": "prescription",
+    "medicines": [
+      {"name": "Paracetamol", "dosage": "500mg", "frequency": "1-0-1", "timing": "after food", "duration": "5 days"},
+      {"name": "Amlodipine", "dosage": "5mg", "frequency": "1-0-0", "timing": "before breakfast", "duration": "30 days"},
+      {"name": "Vitamin D3", "dosage": "60K", "frequency": "0-0-1", "timing": "after dinner", "duration": "10 days"},
+      {"name": "Metformin", "dosage": "500mg", "frequency": "1-0-1", "timing": "after food", "duration": "30 days"}
+    ]
+  },
+  "sample_strip1.jpg": {
+    "type": "strip",
+    "brand": "Crocin",
+    "medicine_name": "Paracetamol",
+    "dosage": "500mg"
+  },
+  "sample_strip2.jpg": {
+    "type": "strip",
+    "brand": "Amlokind",
+    "medicine_name": "Amlodipine",
+    "dosage": "5mg"
+  }
+}
