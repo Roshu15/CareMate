@@ -1,13 +1,21 @@
+import os
 import sqlite3
 import time
+import threading
 from datetime import datetime
 
 
-GRACE_PERIOD = 30  # minutes
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "caremate.db"
+)
+
+
+GRACE_PERIOD = 1  # minutes
 
 
 def get_medicines():
-    connection = sqlite3.connect("caremate.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     cursor.execute("""
@@ -32,13 +40,10 @@ def record_status(
     scheduled_time,
     status
 ):
-
     connection = sqlite3.connect("caremate.db")
     cursor = connection.cursor()
 
-    taken_at = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    taken_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute("""
     INSERT INTO medication_logs
@@ -60,6 +65,71 @@ def record_status(
 
     connection.commit()
     connection.close()
+
+
+def handle_reminder(
+    name,
+    dose,
+    scheduled_date,
+    scheduled_time
+):
+
+    print("\n🔔 MEDICINE REMINDER")
+    print("Medicine:", name)
+    print("Dose:", dose)
+    print("Scheduled time:", scheduled_time)
+
+    print("\n1. Taken")
+    print("2. Missed")
+
+    # Wait for user response in a separate thread
+    def get_response():
+
+        choice = input("Enter your choice: ")
+
+        if choice == "1":
+            record_status(
+                name,
+                scheduled_date,
+                scheduled_time,
+                "Taken"
+            )
+            print("✅ Status saved: Taken")
+
+        elif choice == "2":
+            record_status(
+                name,
+                scheduled_date,
+                scheduled_time,
+                "Missed"
+            )
+            print("❌ Status saved: Missed")
+
+    thread = threading.Thread(
+        target=get_response,
+        daemon=True
+    )
+
+    thread.start()
+
+    # Wait for grace period
+    time.sleep(GRACE_PERIOD * 60)
+
+    # Check whether response was given
+    if thread.is_alive():
+
+        record_status(
+            name,
+            scheduled_date,
+            scheduled_time,
+            "Missed"
+        )
+
+        print("\n⏰ Missed dose detected")
+        print("Medicine:", name)
+        print("Scheduled date:", scheduled_date)
+        print("Scheduled time:", scheduled_time)
+        print("Status: Missed")
 
 
 reminders_triggered = set()
@@ -105,7 +175,6 @@ while True:
                 reminder_time
             )
 
-            # Show reminder at scheduled time
             if (
                 now >= reminder_datetime
                 and now < reminder_datetime.fromtimestamp(
@@ -116,70 +185,15 @@ while True:
 
                 reminders_triggered.add(reminder_key)
 
-                print("\n🔔 MEDICINE REMINDER")
-                print("Medicine:", name)
-                print("Dose:", dose)
-                print("Time:", reminder_time)
-                print("Valid until:", end_date)
-
-                print("\n1. Taken")
-                print("2. Missed")
-
-                choice = input("Enter your choice: ")
-
-                if choice == "1":
-
-                    record_status(
+                threading.Thread(
+                    target=handle_reminder,
+                    args=(
                         name,
+                        dose,
                         str(today),
-                        reminder_time,
-                        "Taken"
-                    )
-
-                    print("✅ Status saved: Taken")
-
-                elif choice == "2":
-
-                    record_status(
-                        name,
-                        str(today),
-                        reminder_time,
-                        "Missed"
-                    )
-
-                    print("❌ Status saved: Missed")
-
-            # Automatically mark as missed after 30 minutes
-            missed_key = (
-                str(today),
-                name,
-                reminder_time,
-                "missed"
-            )
-
-            missed_time = reminder_datetime.fromtimestamp(
-                reminder_datetime.timestamp()
-                + GRACE_PERIOD * 60
-            )
-
-            if (
-                now >= missed_time
-                and missed_key not in reminders_triggered
-            ):
-
-                reminders_triggered.add(missed_key)
-
-                record_status(
-                    name,
-                    str(today),
-                    reminder_time,
-                    "Missed"
-                )
-
-                print("\n⏰ Missed dose detected")
-                print("Medicine:", name)
-                print("Scheduled date:", today)
-                print("Scheduled time:", reminder_time)
-                print("Status: Missed")
+                        reminder_time
+                    ),
+                    daemon=True
+                ).start()
 
     time.sleep(60)
