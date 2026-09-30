@@ -16,7 +16,7 @@ def process_prescription(image_path):
     start_date = datetime.now().strftime("%Y-%m-%d")
 
     # ---------------- OCR ----------------
-    print("\n🔍 Reading prescription...")
+    print("\n Reading prescription...")
 
     with open(image_path, "rb") as file:
         response = requests.post(
@@ -32,7 +32,7 @@ def process_prescription(image_path):
     result = response.json()
 
     if result.get("IsErroredOnProcessing"):
-        print("❌ OCR failed")
+        print(" OCR failed")
         return
 
     extracted_text = result["ParsedResults"][0]["ParsedText"]
@@ -41,12 +41,12 @@ def process_prescription(image_path):
     print(extracted_text)
 
     # ---------------- MEDICINE EXTRACTION ----------------
-    print("\n💊 Extracting medicines...")
+    print("\n Extracting medicines...")
 
     medicines = extract_medicines(extracted_text)
 
     if not medicines:
-        print("❌ No medicines found.")
+        print(" No medicines found.")
         return
 
     # ---------------- RXNORM + SCHEDULE + DATABASE ----------------
@@ -95,7 +95,7 @@ def process_prescription(image_path):
             rxcui
         )
 
-        print("💾 Saved to database")
+        print(" Saved to database")
         print("----------------------------------------")
 
 

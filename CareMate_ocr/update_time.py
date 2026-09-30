@@ -15,7 +15,7 @@ cursor.execute("""
 UPDATE medicines
 SET reminder_times = ?
 WHERE medicine_name = ?
-""", ("07:41 PM", "Paracetamol"))
+""", ("1:39 PM", "Paracetamol"))
 
 connection.commit()
 connection.close()
