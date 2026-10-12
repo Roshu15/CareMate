@@ -9,7 +9,7 @@ def get_rxnorm_medicine(medicine_name):
         "name": medicine_name
     }
 
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=8)
 
     if response.status_code != 200:
         return None
@@ -24,16 +24,6 @@ def get_rxnorm_medicine(medicine_name):
     return rxcui_list[0]
 
 
-# Medicines extracted from prescription
-medicines = [
-    "Paracetamol",
-    "Amlodipine",
-    "Vitamin D3",
-    "Metformin"
-]
-
-for medicine in medicines:
-
-    rxcui = get_rxnorm_medicine(medicine)
-
-    
+if __name__ == "__main__":
+    for medicine in ("Paracetamol", "Amlodipine", "Vitamin D3", "Metformin"):
+        print(medicine, get_rxnorm_medicine(medicine))

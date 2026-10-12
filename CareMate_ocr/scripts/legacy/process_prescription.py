@@ -1,13 +1,15 @@
-import requests
 from datetime import datetime
+from pathlib import Path
+import sys
 
-from medicine_extractor import extract_medicines
-from rxnorm import get_rxnorm_medicine
-from schedule_generation import generate_schedule
-from database import add_medicine
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-
-API_KEY = "K82343367488957"
+from backend.medicine_extractor import extract_medicines
+from backend.rxnorm import get_rxnorm_medicine
+from backend.schedule_generation import generate_schedule
+from backend.database import add_medicine
+from backend.ocr import extract_text
 
 
 def process_prescription(image_path):
@@ -19,23 +21,7 @@ def process_prescription(image_path):
     print("\n Reading prescription...")
 
     with open(image_path, "rb") as file:
-        response = requests.post(
-            "https://api.ocr.space/parse/image",
-            headers={"apikey": API_KEY},
-            files={"file": file},
-            data={
-                "language": "eng",
-                "OCREngine": "3"
-            }
-        )
-
-    result = response.json()
-
-    if result.get("IsErroredOnProcessing"):
-        print(" OCR failed")
-        return
-
-    extracted_text = result["ParsedResults"][0]["ParsedText"]
+        extracted_text = extract_text(file.read(), image_path)
 
     print("\n========== OCR TEXT ==========")
     print(extracted_text)
@@ -103,6 +89,6 @@ def process_prescription(image_path):
 
 if __name__ == "__main__":
 
-    image_path = "prescription.jpg"
+    image_path = PROJECT_ROOT / "prescription.jpg"
 
     process_prescription(image_path)

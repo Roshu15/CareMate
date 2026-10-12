@@ -1,6 +1,8 @@
 import sqlite3
+from pathlib import Path
 
-connection = sqlite3.connect("caremate.db")
+DB_PATH = Path(__file__).resolve().parents[2] / "caremate.db"
+connection = sqlite3.connect(DB_PATH)
 cursor = connection.cursor()
 
 cursor.execute("""

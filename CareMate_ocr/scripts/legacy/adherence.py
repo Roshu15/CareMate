@@ -1,9 +1,11 @@
 import sqlite3
+from pathlib import Path
 
+DB_PATH = Path(__file__).resolve().parents[2] / "caremate.db"
 
 def get_adherence():
 
-    connection = sqlite3.connect("caremate.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     cursor.execute("""
