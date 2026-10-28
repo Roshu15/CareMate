@@ -24,7 +24,7 @@ CareMate is a record-keeping and reminder aid. It does not prescribe medication,
 | HTTP client | `requests` | Calls OCR.space and RxNav |
 | Upload parsing | `python-multipart` | Receives prescription image uploads |
 
-There is no separate frontend framework, Node backend, hosted database, email/SMS provider, push-notification service, or LLM integration in the current implementation. The care assistant endpoint uses conservative built-in responses and urgent-phrase detection.
+There is no separate frontend framework, Node backend, hosted database, email/SMS provider, push-notification service, or LLM integration in the current implementation. The authenticated care assistant uses built-in English, Hindi, and Marathi intents and can summarize the signed-in user's accessible medication records.
 
 ## 3. Architecture and request flow
 
@@ -182,7 +182,8 @@ Medication plans include name, dose, frequency, timing instructions, course dura
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/contact` | Accepts a contact message (public route) |
-| `POST` | `/api/chat` | Returns built-in conservative care guidance and urgent-phrase flag (public route) |
+| `GET` | `/api/chat/history` | Returns the signed-in user's saved chat messages |
+| `POST` | `/api/chat` | Saves the message and returns a built-in localized reply using available CareMate records |
 | `GET` | `/api/rxnorm?name=...` | Looks up a medicine name through the RxNav/RxNorm REST API |
 
 ## 7. Reminders and delivery behavior
@@ -265,7 +266,7 @@ The module also keeps `add_medicine()` and `record_status()` helpers for direct/
 
 **Session creation:** `new_session()` creates a long random bearer token and stores only its SHA-256 hash alongside the user ID and expiration timestamp. The plain token is returned once to the browser. The browser stores it in local storage and sends it in the `Authorization` header.
 
-**Per-request authentication:** `auth_middleware()` permits public routes such as registration, login, contact, and the built-in chat. Other `/api/` calls must have a valid bearer session. It resolves the token to a user and checks IDs in patient-scoped URLs, medicine URLs, and other resource URLs. `enforce_patient_access()` permits the patient account owner or a caregiver whose connection was approved.
+**Per-request authentication:** `auth_middleware()` permits public routes such as registration, login, and contact. Other `/api/` calls must have a valid bearer session. It resolves the token to a user and checks IDs in patient-scoped URLs, medicine URLs, and other resource URLs. `enforce_patient_access()` permits the patient account owner or a caregiver whose connection was approved. Chat history is filtered by the authenticated user, and patient-specific chat lookups validate that the user has access to the requested patient.
 
 Logout removes the current session hash. Changing a password deletes sessions for the user, which signs out other devices as well.
 
@@ -347,7 +348,7 @@ The frontend is a small single-page application without a build step:
 
 ### 11.10 Built-in chat and external lookup
 
-`chat()` checks the message for a short list of emergency phrases. If one matches, it responds with a direction to seek local emergency help. Otherwise it returns fixed conservative language: it cannot diagnose, adjust prescriptions, or recommend doses. It is not a model-backed chatbot and does not use an API key.
+`chat()` checks for emergency language, common CareMate topics, and questions about saved medicines, today's schedule, or missed-dose records. Record lookups are limited to the authenticated user's patient profiles or approved caregiver connections. User and assistant messages are saved in `chat_messages`; replies are available in English, Hindi, and Marathi. The assistant uses built-in rules rather than a language model, does not diagnose, and does not recommend or change doses. Unmatched questions get a localized clarification prompt.
 
 `rxnorm_lookup()` calls the public RxNav REST endpoint with `requests`, applies a timeout, and returns matching RxNorm concept identifiers when available. A network/API failure returns an empty match list and an error indicator rather than crashing the rest of the app.
 

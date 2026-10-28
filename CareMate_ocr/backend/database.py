@@ -97,6 +97,12 @@ def create_tables():
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, message TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('user','assistant')), message TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_user ON chat_messages(user_id,id);
         CREATE INDEX IF NOT EXISTS idx_logs_date ON medication_logs(scheduled_date);
         CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at);
         """)

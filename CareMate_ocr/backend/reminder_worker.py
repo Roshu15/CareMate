@@ -46,7 +46,7 @@ def process_due_items(now=None):
     now = now or datetime.now().astimezone()
     today = now.date()
     with store.connection() as db:
-        medicines = db.execute("SELECT * FROM medicines WHERE active=1 AND patient_id IS NOT NULL").fetchall()
+        medicines = db.execute("SELECT m.*,p.name AS patient_name FROM medicines m JOIN patients p ON p.id=m.patient_id WHERE m.active=1 AND m.patient_id IS NOT NULL").fetchall()
         for med in medicines:
             try:
                 start = date.fromisoformat(med["start_date"])
@@ -77,8 +77,8 @@ def process_due_items(now=None):
                     if elapsed >= timedelta(minutes=DOSE_GRACE_MINUTES):
                         db.execute("INSERT OR IGNORE INTO medication_logs(medicine_id,scheduled_date,scheduled_time,status) VALUES(?,?,?,'missed')",
                                    (med["id"],scheduled_date,time_text))
-                        _notify(db,med["patient_id"],dose_key+":missed","Missed medicine dose",
-                                f"{med['medicine_name']} ({med['dose']}) was not confirmed at {time_text} on {scheduled_date}.","missed_dose")
+                        _notify(db,med["patient_id"],dose_key+":missed",f"Missed medicine dose for {med['patient_name']}",
+                                f"{med['patient_name']} missed {med['medicine_name']} ({med['dose']}) at {time_text} on {scheduled_date}.","missed_dose")
                     else:
                         _notify(db,med["patient_id"],dose_key,"Medicine reminder",
                                 f"Time for {med['medicine_name']} ({med['dose']}) at {time_text}. Please confirm whether it was taken.","medicine")

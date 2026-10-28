@@ -67,7 +67,7 @@ def enforce_patient_access(db, user, patient_id: int):
 
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    public = {"/api/auth/register", "/api/auth/login", "/api/contact", "/api/chat"}
+    public = {"/api/auth/register", "/api/auth/login", "/api/contact"}
     if not path.startswith("/api/") or path in public or request.method == "OPTIONS":
         return await call_next(request)
     try:

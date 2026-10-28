@@ -16,7 +16,7 @@ from .medicine_extractor import extract_medicines
 from .ocr import extract_text
 from .schedule_generation import generate_schedule
 from .security import auth_middleware, hash_password, new_session, verify_password
-from .reminder_worker import run_reminder_worker, _notify
+from .reminder_worker import run_reminder_worker, _notify, DOSE_GRACE_MINUTES
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -98,6 +98,7 @@ class ContactIn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    patient_id: Optional[int] = None
 
 
 def normalize_datetime(value: str) -> str:
@@ -411,8 +412,11 @@ def record_dose(medicine_id:int,payload:DoseIn):
     try: date.fromisoformat(payload.scheduled_date); datetime.strptime(payload.scheduled_time,"%H:%M")
     except ValueError: raise HTTPException(422,"Use YYYY-MM-DD scheduled_date and HH:MM scheduled_time")
     with store.connection() as db:
-        med=db.execute("SELECT id,medicine_name,dose,patient_id FROM medicines WHERE id=?",(medicine_id,)).fetchone()
+        med=db.execute("SELECT m.id,m.medicine_name,m.dose,m.patient_id,p.name AS patient_name FROM medicines m JOIN patients p ON p.id=m.patient_id WHERE m.id=?",(medicine_id,)).fetchone()
         if not med: raise HTTPException(404,"Medicine not found")
+        scheduled=datetime.combine(date.fromisoformat(payload.scheduled_date),datetime.strptime(payload.scheduled_time,"%H:%M").time()).astimezone()
+        if payload.status.lower()=="taken" and datetime.now().astimezone()-scheduled >= timedelta(minutes=DOSE_GRACE_MINUTES):
+            raise HTTPException(409,"The 30-minute confirmation window has passed; this dose is marked missed.")
         logged=db.execute("SELECT id FROM medication_logs WHERE medicine_id=? AND scheduled_date=? AND scheduled_time=? ORDER BY id DESC LIMIT 1",(medicine_id,payload.scheduled_date,payload.scheduled_time)).fetchone()
         taken_at=datetime.now().isoformat(timespec="seconds") if payload.status.lower()=="taken" else None
         if logged:
@@ -426,8 +430,8 @@ def record_dose(medicine_id:int,payload:DoseIn):
                 db.execute("INSERT INTO medication_logs(medicine_id,scheduled_date,scheduled_time,status,taken_at,note) VALUES(?,?,?,?,?,?)",
                            (medicine_id,payload.scheduled_date,payload.scheduled_time,payload.status.lower(),taken_at,payload.note))
         if payload.status.lower()=="missed":
-            _notify(db,med["patient_id"],f"dose:{medicine_id}:{payload.scheduled_date}:{payload.scheduled_time}:missed","Missed medicine dose",
-                    f"{med['medicine_name']} ({med['dose']}) was marked missed at {payload.scheduled_time}.","missed_dose")
+            _notify(db,med["patient_id"],f"dose:{medicine_id}:{payload.scheduled_date}:{payload.scheduled_time}:missed",f"Missed medicine dose for {med['patient_name']}",
+                    f"{med['patient_name']} missed {med['medicine_name']} ({med['dose']}) at {payload.scheduled_time} on {payload.scheduled_date}.","missed_dose")
         return rowdict(db.execute("SELECT * FROM medication_logs WHERE medicine_id=? AND scheduled_date=? AND scheduled_time=? ORDER BY id DESC LIMIT 1",(medicine_id,payload.scheduled_date,payload.scheduled_time)).fetchone())
 
 @app.get("/api/patients/{patient_id}/doses")
@@ -446,13 +450,16 @@ def daily_schedule(patient_id:int,on:Optional[str]=None):
     with store.connection() as db:
         require_patient(db,patient_id)
         meds=db.execute("SELECT * FROM medicines WHERE patient_id=? AND active=1",(patient_id,)).fetchall()
+        now=datetime.now().astimezone()
         items=[]
         for med in meds:
             start=date.fromisoformat(med["start_date"])
             if day<start or (med["duration"] and day>=start+timedelta(days=med["duration"])): continue
             for scheduled_time in parse_times(med["reminder_times"]):
                 log=db.execute("SELECT status,taken_at FROM medication_logs WHERE medicine_id=? AND scheduled_date=? AND scheduled_time=?",(med["id"],target,scheduled_time)).fetchone()
-                items.append({"medicine_id":med["id"],"medicine_name":med["medicine_name"],"dose":med["dose"],"scheduled_date":target,"scheduled_time":scheduled_time,"status":log["status"] if log else "pending","taken_at":log["taken_at"] if log else None,"timing":med["timing"]})
+                due=datetime.combine(day,datetime.strptime(scheduled_time,"%H:%M").time()).astimezone()
+                status=log["status"] if log else ("missed" if now-due>=timedelta(minutes=DOSE_GRACE_MINUTES) else "pending")
+                items.append({"medicine_id":med["id"],"medicine_name":med["medicine_name"],"dose":med["dose"],"scheduled_date":target,"scheduled_time":scheduled_time,"status":status,"taken_at":log["taken_at"] if log else None,"timing":med["timing"]})
         return sorted(items,key=lambda item:item["scheduled_time"])
 
 @app.get("/api/patients/{patient_id}/reports/adherence")
@@ -565,13 +572,249 @@ def contact(payload:ContactIn):
         cur=db.execute("INSERT INTO contact_messages(name,email,message) VALUES(?,?,?)",(payload.name,payload.email,payload.message))
         return {"id":cur.lastrowid,"status":"received"}
 
+CHAT_REPLIES = {
+    "en": {
+        "welcome": "Hi! I can help you use CareMate and keep track of care tasks. I cannot diagnose, recommend doses, or change a prescription. What would you like help with?",
+        "emergency": "This may be an emergency. Contact your local emergency service or a qualified healthcare professional now. I cannot assess emergencies or provide treatment instructions.",
+        "missed": "Do not take an extra dose or change the schedule based on this chat. Check the prescription instructions and contact the doctor or pharmacist for advice about a missed dose.",
+        "prescription": "Open Prescription in CareMate and upload a clear photo. Check every extracted medicine name, strength, and instruction against the original prescription before saving. Ask a pharmacist or doctor if anything is unclear.",
+        "tracking": "Open Medications to review the current medicine plan and reminder times. The Overview shows today's doses. CareMate can help organize the schedule, but follow the prescription and ask your doctor or pharmacist about medicine decisions.",
+        "general": "I can help explain CareMate features, reminders, prescription scanning, and dose tracking. I cannot diagnose, recommend a dose, or change a prescription. What would you like to do in the app?",
+    },
+    "hi": {
+        "welcome": "नमस्ते! मैं CareMate का उपयोग करने और देखभाल के कामों का रिकॉर्ड रखने में मदद कर सकता हूँ। मैं बीमारी का निदान, खुराक की सलाह या पर्चे में बदलाव नहीं कर सकता। आपको किस बारे में मदद चाहिए?",
+        "emergency": "यह आपातकाल हो सकता है। अभी स्थानीय आपातकालीन सेवा या योग्य स्वास्थ्यकर्मी से संपर्क करें। मैं आपात स्थिति का आकलन या इलाज के निर्देश नहीं दे सकता।",
+        "missed": "इस चैट के आधार पर अतिरिक्त खुराक न लें और समय-सारणी न बदलें। छूटी हुई खुराक के बारे में पर्चे के निर्देश देखें और डॉक्टर या फार्मासिस्ट से पूछें।",
+        "prescription": "CareMate में Prescription खोलें और साफ़ तस्वीर अपलोड करें। सहेजने से पहले निकाले गए दवा के नाम, ताकत और निर्देशों को मूल पर्चे से मिलाएँ। कुछ स्पष्ट न हो तो डॉक्टर या फार्मासिस्ट से पूछें।",
+        "tracking": "मौजूदा दवा योजना और रिमाइंडर का समय देखने के लिए Medications खोलें। Overview में आज की खुराकें दिखती हैं। दवा संबंधी फैसलों के लिए पर्चे का पालन करें और डॉक्टर या फार्मासिस्ट से पूछें।",
+        "general": "मैं CareMate के फीचर्स, रिमाइंडर, पर्चा स्कैन करने और खुराक का रिकॉर्ड रखने में मदद कर सकता हूँ। मैं बीमारी का निदान, खुराक की सलाह या पर्चे में बदलाव नहीं कर सकता। ऐप में आप क्या करना चाहते हैं?",
+    },
+    "mr": {
+        "welcome": "नमस्कार! CareMate वापरणे आणि काळजीच्या कामांची नोंद ठेवणे यासाठी मी मदत करू शकतो. मी निदान, मात्रेचा सल्ला किंवा प्रिस्क्रिप्शनमध्ये बदल करू शकत नाही. तुम्हाला कशासाठी मदत हवी आहे?",
+        "emergency": "ही आपत्कालीन परिस्थिती असू शकते. आत्ताच स्थानिक आपत्कालीन सेवा किंवा पात्र आरोग्यतज्ज्ञांशी संपर्क साधा. मी आपत्कालीन स्थितीचे मूल्यांकन किंवा उपचारांच्या सूचना देऊ शकत नाही.",
+        "missed": "या चॅटच्या आधारे अतिरिक्त मात्रा घेऊ नका किंवा वेळापत्रक बदलू नका. चुकलेल्या मात्रेबद्दल प्रिस्क्रिप्शनमधील सूचना पहा आणि डॉक्टर किंवा फार्मासिस्टचा सल्ला घ्या.",
+        "prescription": "CareMate मधील Prescription उघडा आणि स्पष्ट फोटो अपलोड करा. जतन करण्यापूर्वी औषधाचे नाव, ताकद आणि सूचना मूळ प्रिस्क्रिप्शनशी तपासा. काही स्पष्ट नसल्यास डॉक्टर किंवा फार्मासिस्टला विचारा.",
+        "tracking": "सध्याची औषध योजना आणि स्मरणपत्राच्या वेळा पाहण्यासाठी Medications उघडा. Overview मध्ये आजच्या मात्रा दिसतात. औषधांबाबत प्रिस्क्रिप्शनचे पालन करा आणि डॉक्टर किंवा फार्मासिस्टचा सल्ला घ्या.",
+        "general": "CareMate ची वैशिष्ट्ये, स्मरणपत्रे, प्रिस्क्रिप्शन स्कॅन आणि मात्रांची नोंद याबद्दल मी मदत करू शकतो. मी निदान, मात्रेचा सल्ला किंवा प्रिस्क्रिप्शनमध्ये बदल करू शकत नाही. अॅपमध्ये तुम्हाला काय करायचे आहे?",
+    },
+}
+CHAT_REPLIES["en"].update({
+    "greeting":"Hello! What would you like help with in CareMate? I can guide you through reminders, medication tracking, and prescription scanning.",
+    "add_medicine":"To add a medicine, open Medications and choose Add medicine. Enter the details exactly as written on the prescription, then confirm the reminder times.",
+    "record":"Open Overview to see today's schedule, then choose the dose and mark it taken or missed. If the schedule is wrong, ask your care team to update the medicine plan.",
+    "appointment":"Open Care team and use Doctor follow-ups to add a visit date and time. CareMate will create an in-app reminder before the visit.",
+    "medicine_safety":"For side effects, interactions, or whether a medicine is right for you, contact your doctor or pharmacist. Do not stop or change a medicine based on this chat.",
+})
+CHAT_REPLIES["hi"].update({
+    "greeting":"नमस्ते! CareMate में रिमाइंडर, दवा का रिकॉर्ड या पर्चा स्कैन करने में क्या मदद चाहिए?",
+    "add_medicine":"दवा जोड़ने के लिए Medications खोलें और Add medicine चुनें। पर्चे में दी गई जानकारी भरें और रिमाइंडर का समय जाँचें।",
+    "record":"आज की खुराक देखने के लिए Overview खोलें और खुराक को ली गई या छूटी हुई दर्ज करें। समय-सारणी गलत हो तो अपनी देखभाल टीम से दवा योजना ठीक करवाएँ।",
+    "appointment":"Care team खोलें और Doctor follow-ups में मुलाक़ात की तारीख और समय जोड़ें। मुलाक़ात से पहले CareMate रिमाइंडर देगा।",
+    "medicine_safety":"दुष्प्रभाव, दूसरी दवाओं के साथ प्रतिक्रिया या दवा की उपयुक्तता के बारे में डॉक्टर या फार्मासिस्ट से पूछें। इस चैट के आधार पर दवा बंद या न बदलें।",
+})
+CHAT_REPLIES["mr"].update({
+    "greeting":"नमस्कार! CareMate मधील स्मरणपत्रे, औषधांची नोंद किंवा प्रिस्क्रिप्शन स्कॅन याबद्दल काय मदत हवी आहे?",
+    "add_medicine":"औषध जोडण्यासाठी Medications उघडा आणि Add medicine निवडा. प्रिस्क्रिप्शनवरील माहिती भरा आणि स्मरणपत्राच्या वेळा तपासा.",
+    "record":"आजचा औषध दिनक्रम पाहण्यासाठी Overview उघडा आणि मात्रा घेतली किंवा चुकली अशी नोंद करा. वेळापत्रक चुकीचे असल्यास काळजी पथकाला औषध योजना दुरुस्त करण्यास सांगा.",
+    "appointment":"Care team उघडा आणि Doctor follow-ups मध्ये भेटीची तारीख व वेळ जोडा. भेटीपूर्वी CareMate अॅपमध्ये स्मरणपत्र देईल.",
+    "medicine_safety":"दुष्परिणाम, औषधांमधील परस्परक्रिया किंवा औषध योग्य आहे का यासाठी डॉक्टर किंवा फार्मासिस्टचा सल्ला घ्या. या चॅटवरून औषध थांबवू किंवा बदलू नका.",
+})
+CHAT_REPLIES["mr"].update({
+    "prescription":"CareMate मधील प्रिस्क्रिप्शन विभाग उघडा आणि स्पष्ट फोटो अपलोड करा. जतन करण्यापूर्वी औषधाचे नाव, ताकद आणि सूचना मूळ प्रिस्क्रिप्शनशी तपासा. काही स्पष्ट नसल्यास डॉक्टर किंवा फार्मासिस्टला विचारा.",
+    "tracking":"सध्याची औषध योजना आणि स्मरणपत्राच्या वेळा पाहण्यासाठी औषधे पान उघडा. आढावा पानावर आजच्या मात्रा दिसतात. औषधांबाबत प्रिस्क्रिप्शनचे पालन करा आणि डॉक्टर किंवा फार्मासिस्टचा सल्ला घ्या.",
+    "add_medicine":"औषध जोडण्यासाठी औषधे पान उघडा आणि औषध जोडा निवडा. प्रिस्क्रिप्शनवरील माहिती भरा आणि स्मरणपत्राच्या वेळा तपासा.",
+    "record":"आजचा औषध दिनक्रम पाहण्यासाठी आढावा पान उघडा आणि मात्रा घेतली किंवा चुकली अशी नोंद करा. वेळापत्रक चुकीचे असल्यास काळजी पथकाला औषध योजना दुरुस्त करण्यास सांगा.",
+    "appointment":"काळजी पथक पान उघडा आणि डॉक्टरांच्या पुढील भेटी या विभागात भेटीची तारीख व वेळ जोडा. भेटीपूर्वी CareMate अॅपमध्ये स्मरणपत्र देईल.",
+})
+CHAT_ALTERNATES = {
+    "mr": {
+        "greeting":["नमस्कार! मी CareMate वापरण्याबद्दल मदत करू शकतो. तुम्हाला औषधांची नोंद, स्मरणपत्रे की भेटी जोडण्याबद्दल विचारायचे आहे?"],
+        "general":["तुमचा प्रश्न थोडा अधिक तपशीलाने सांगाल का? मी CareMate मधील औषध नोंद, स्मरणपत्रे, प्रिस्क्रिप्शन स्कॅन आणि भेटी याबद्दल मार्गदर्शन करू शकतो."],
+        "tracking":["औषध योजना आणि स्मरणपत्राच्या वेळा औषधे पानावर दिसतात; आजच्या मात्रांसाठी आढावा पहा. औषध कसे घ्यायचे याबाबत प्रिस्क्रिप्शन किंवा डॉक्टरांचा सल्ला पाळा."],
+        "missed":["चुकलेली मात्रा भरून काढण्यासाठी दोन मात्रा घेऊ नका. प्रिस्क्रिप्शनवरील सूचनांनुसार वागा आणि पुढे काय करावे हे डॉक्टर किंवा फार्मासिस्टला विचारा."],
+        "prescription":["पर्चा जोडायचा असल्यास प्रिस्क्रिप्शन विभागात फोटो अपलोड करा. OCR मधील माहिती मूळ पर्च्याशी तपासल्याशिवाय औषध योजना जतन करू नका."],
+        "emergency":["लक्षणे गंभीर असतील किंवा जीवाला धोका वाटत असेल तर चॅटची वाट पाहू नका—स्थानिक आपत्कालीन सेवेला किंवा आरोग्यतज्ज्ञांना त्वरित संपर्क करा."],
+        "add_medicine":["Medications पानावर Add medicine वापरा. नाव, मात्रा आणि सूचना मूळ प्रिस्क्रिप्शनशी जुळतात याची खात्री करा; शंका असल्यास फार्मासिस्टला विचारा."],
+        "record":["Overview मधील आजच्या वेळापत्रकातून योग्य मात्रा निवडा आणि तिची स्थिती नोंदवा. नोंद चुकल्यास तीच मात्रा पुन्हा उघडून स्थिती दुरुस्त करा."],
+        "appointment":["भेटीची आठवण ठेवण्यासाठी काळजी पथक पानावरील डॉक्टरांच्या पुढील भेटी या फॉर्ममध्ये तारीख आणि वेळ भरा."],
+        "medicine_safety":["औषधामुळे त्रास होत असल्यास स्वतःहून डोस बदलू नका. लक्षणे आणि औषधाची माहिती डॉक्टर किंवा फार्मासिस्टला सांगा."],
+    },
+}
+
+CHAT_DATA_TEXT = {
+    "en": {
+        "no_patient":"I can't see a patient profile connected to this account yet. Connect a patient or ask the caretaker to add one.",
+        "no_medicines":"I don't see any active medicine plans saved in CareMate for this patient.",
+        "medicines":"Active medicine plans saved in CareMate:",
+        "no_today":"There are no doses scheduled in CareMate for today.",
+        "today":"Today's schedule recorded in CareMate:",
+        "no_missed":"I don't see any missed doses recorded in CareMate in the last 30 days.",
+        "missed":"Missed doses recorded in CareMate in the last 30 days:",
+        "dose_taken":"taken", "dose_missed":"missed", "dose_skipped":"skipped", "dose_pending":"not yet recorded",
+        "times":"Reminder times", "verify":"This is the information saved in CareMate. Follow the original prescription if anything differs.",
+        "medicine_detail":"CareMate record for {patient}: {medicine}{dose}{instructions}{times}. CareMate does not store what each medicine treats. Ask the prescriber or pharmacist about its purpose or any changes.",
+    },
+    "hi": {
+        "no_patient":"इस खाते से अभी कोई मरीज़ प्रोफ़ाइल जुड़ी नहीं है। मरीज़ को जोड़ें या केयरटेकर से प्रोफ़ाइल जोड़ने को कहें।",
+        "no_medicines":"इस मरीज़ के लिए CareMate में कोई सक्रिय दवा योजना दर्ज नहीं है।",
+        "medicines":"CareMate में दर्ज सक्रिय दवा योजनाएँ:",
+        "no_today":"CareMate में आज के लिए कोई खुराक तय नहीं है।",
+        "today":"CareMate में आज के लिए दर्ज समय-सारणी:",
+        "no_missed":"पिछले 30 दिनों में CareMate में कोई छूटी हुई खुराक दर्ज नहीं है।",
+        "missed":"पिछले 30 दिनों में CareMate में दर्ज छूटी हुई खुराकें:",
+        "dose_taken":"ली गई", "dose_missed":"छूटी", "dose_skipped":"छोड़ दी गई", "dose_pending":"अभी दर्ज नहीं",
+        "times":"रिमाइंडर का समय", "verify":"यह CareMate में सहेजी गई जानकारी है। कोई अंतर हो तो मूल पर्चे का पालन करें।",
+        "medicine_detail":"{patient} के लिए CareMate में दर्ज जानकारी: {medicine}{dose}{instructions}{times}। CareMate में दवा किस समस्या के लिए है, यह दर्ज नहीं होता। इसके उपयोग या बदलाव के बारे में डॉक्टर या फार्मासिस्ट से पूछें।",
+    },
+    "mr": {
+        "no_patient":"या खात्याशी अजून रुग्ण प्रोफाइल जोडलेली दिसत नाही. रुग्ण जोडा किंवा काळजीवाहकाला प्रोफाइल जोडण्यास सांगा.",
+        "no_medicines":"या रुग्णासाठी CareMate मध्ये सध्या औषध योजना नोंदवलेली नाही.",
+        "medicines":"CareMate मध्ये नोंदवलेल्या सध्याच्या औषध योजना:",
+        "no_today":"CareMate मध्ये आजसाठी कोणतीही मात्रा ठरवलेली नाही.",
+        "today":"CareMate मध्ये आजसाठी नोंदवलेले वेळापत्रक:",
+        "no_missed":"मागील ३० दिवसांत CareMate मध्ये चुकलेली मात्रा नोंदलेली नाही.",
+        "missed":"मागील ३० दिवसांत CareMate मध्ये नोंदलेल्या चुकलेल्या मात्रा:",
+        "dose_taken":"घेतली", "dose_missed":"चुकली", "dose_skipped":"वगळली", "dose_pending":"अद्याप नोंद नाही",
+        "times":"स्मरणपत्राच्या वेळा", "verify":"ही CareMate मध्ये जतन केलेली माहिती आहे. काही फरक असल्यास मूळ प्रिस्क्रिप्शनचे पालन करा.",
+        "medicine_detail":"{patient} यांच्यासाठी CareMate मध्ये नोंद: {medicine}{dose}{instructions}{times}. हे औषध कशासाठी आहे याची माहिती CareMate मध्ये नाही. उपयोग किंवा बदलांसाठी डॉक्टर किंवा फार्मासिस्टचा सल्ला घ्या.",
+    },
+}
+
+CHAT_CLARIFY = {
+    "en":"I didn't understand that yet. Try asking what medicines are saved, what is scheduled today, or how to add a medicine.",
+    "hi":"मैं आपका सवाल ठीक से नहीं समझ पाया। पूछें कि कौन-सी दवाएँ दर्ज हैं, आज क्या तय है, या दवा कैसे जोड़ें।",
+    "mr":"तुमचा प्रश्न मला नीट समजला नाही. कोणती औषधे नोंदली आहेत, आजचे वेळापत्रक काय आहे किंवा औषध कसे जोडायचे असे विचारा.",
+}
+
+def _chat_patients(db,user,requested_patient_id):
+    if user["role"]=="caregiver":
+        rows=db.execute("SELECT p.id,p.name FROM patients p JOIN patient_caregivers pc ON pc.patient_id=p.id WHERE pc.caregiver_id=? ORDER BY p.name",(user["id"],)).fetchall()
+    else:
+        rows=db.execute("SELECT id,name FROM patients WHERE created_by=? ORDER BY name",(user["id"],)).fetchall()
+    patients=[dict(r) for r in rows]
+    if requested_patient_id is not None:
+        selected=next((p for p in patients if p["id"]==requested_patient_id),None)
+        if selected is None: raise HTTPException(403,"You do not have access to this patient")
+        return [selected]
+    return patients
+
+def _chat_find_medicine(db,message,patients):
+    if not patients: return None
+    patient_ids=[p["id"] for p in patients]
+    marks=",".join("?" for _ in patient_ids)
+    rows=db.execute(f"SELECT m.*,p.name AS patient_name FROM medicines m JOIN patients p ON p.id=m.patient_id WHERE m.active=1 AND m.patient_id IN ({marks})",patient_ids).fetchall()
+    query=message.casefold()
+    matches=[dict(r) for r in rows if len(r["medicine_name"].strip())>=3 and r["medicine_name"].casefold() in query]
+    return max(matches,key=lambda med:len(med["medicine_name"])) if matches else None
+
+def _chat_data_reply(db,intent,patients,language,matched_medicine=None):
+    strings=CHAT_DATA_TEXT[language]
+    if not patients: return strings["no_patient"]
+    if intent=="medicine_info" and matched_medicine:
+        med=matched_medicine
+        dose=f" ({med['dose']})" if med["dose"] else ""
+        instructions=f"; {med['timing']}" if med["timing"] else ""
+        times=parse_times(med["reminder_times"])
+        time_text=f"; {strings['times'].lower()}: {', '.join(times)}" if times else ""
+        return strings["medicine_detail"].format(patient=med["patient_name"],medicine=med["medicine_name"],dose=dose,instructions=instructions,times=time_text)
+    patient_ids=[p["id"] for p in patients]
+    marks=",".join("?" for _ in patient_ids)
+    if intent=="list_medicines":
+        rows=db.execute(f"SELECT m.*,p.name AS patient_name FROM medicines m JOIN patients p ON p.id=m.patient_id WHERE m.active=1 AND m.patient_id IN ({marks}) ORDER BY p.name,m.medicine_name",patient_ids).fetchall()
+        if not rows: return strings["no_medicines"]
+        entries=[]
+        for med in rows:
+            times=parse_times(med["reminder_times"])
+            details=f" ({med['dose']})" if med["dose"] else ""
+            schedule=f" — {strings['times'].lower()}: {', '.join(times)}" if times else ""
+            entries.append(f"• {med['patient_name']}: {med['medicine_name']}{details}{schedule}")
+        return strings["medicines"]+"\n"+"\n".join(entries)+"\n\n"+strings["verify"]
+    if intent=="today_schedule":
+        today=date.today()
+        rows=db.execute(f"SELECT m.*,p.name AS patient_name FROM medicines m JOIN patients p ON p.id=m.patient_id WHERE m.active=1 AND m.patient_id IN ({marks}) ORDER BY p.name,m.medicine_name",patient_ids).fetchall()
+        entries=[]
+        status_label={"taken":strings["dose_taken"],"missed":strings["dose_missed"],"skipped":strings["dose_skipped"]}
+        for med in rows:
+            try: start=date.fromisoformat(med["start_date"])
+            except (TypeError,ValueError): continue
+            if today<start or (med["duration"] and today>=start+timedelta(days=med["duration"])): continue
+            for time_text in parse_times(med["reminder_times"]):
+                log=db.execute("SELECT status FROM medication_logs WHERE medicine_id=? AND scheduled_date=? AND scheduled_time=?",(med["id"],today.isoformat(),time_text)).fetchone()
+                status=status_label.get(log["status"],strings["dose_pending"]) if log else strings["dose_pending"]
+                dose=f" ({med['dose']})" if med["dose"] else ""
+                entries.append((time_text,f"• {time_text} — {med['patient_name']}: {med['medicine_name']}{dose} ({status})"))
+        if not entries: return strings["no_today"]
+        return strings["today"]+"\n"+"\n".join(item[1] for item in sorted(entries))+"\n\n"+strings["verify"]
+    if intent=="missed_summary":
+        since=(date.today()-timedelta(days=29)).isoformat()
+        rows=db.execute(f"SELECT l.scheduled_date,l.scheduled_time,m.medicine_name,m.dose,p.name AS patient_name FROM medication_logs l JOIN medicines m ON m.id=l.medicine_id JOIN patients p ON p.id=m.patient_id WHERE l.status='missed' AND l.scheduled_date>=? AND l.scheduled_date<=? AND m.patient_id IN ({marks}) ORDER BY l.scheduled_date DESC,l.scheduled_time DESC LIMIT 10",[since,date.today().isoformat(),*patient_ids]).fetchall()
+        if not rows: return strings["no_missed"]
+        entries=[f"• {r['scheduled_date']} {r['scheduled_time']} — {r['patient_name']}: {r['medicine_name']}"+(f" ({r['dose']})" if r["dose"] else "") for r in rows]
+        return strings["missed"]+"\n"+"\n".join(entries)
+    return ""
+
+def _chat_reply(message:str,language:str):
+    text=message.casefold()
+    emergency_terms=("chest pain","can't breathe","cannot breathe","difficulty breathing","shortness of breath","overdose","suicid","unconscious","severe allergic","allergic reaction","seizure","stroke","heavy bleeding","सीने में दर्द","छाती में दर्द","सांस नहीं","साँस नहीं","बेहोश","दौरा","ओवरडोज़","आत्महत्या","छातीत दुख","श्वास घेता येत नाही","बेशुद्ध","झटका","अतिमात्रा")
+    if any(term in text for term in emergency_terms): return "emergency",True
+    missed_question_terms=("which dose","which doses","how many doses","missed doses list","कौन सी खुराक","कौन-कौन सी खुराक","कितनी खुराक","चूटी खुराकें","कोणती मात्रा","कोणत्या मात्रा","किती मात्रा","चुकलेल्या मात्रा")
+    if any(term in text for term in missed_question_terms): return "missed_summary",False
+    today_markers=("today","आज","आजचा","आजची","आजचे","आजच्या")
+    dose_markers=("dose","medicine","medication","औषध","मात्रा","गोळी","दवा","दवाई","खुराक")
+    if any(term in text for term in today_markers) and any(term in text for term in dose_markers): return "today_schedule",False
+    time_question_terms=("what time","when do i take","medicine time","कब लेनी","किस समय","दवा का समय","कधी घ्यायची","कधी घ्यायचे","किती वाजता","औषधाची वेळ","मात्रेची वेळ")
+    if any(term in text for term in time_question_terms) and any(term in text for term in dose_markers): return "today_schedule",False
+    medicine_list_terms=("what medicines","which medicines","my medicines","medicines are saved","list my medicines","माझी औषधे","माझ्या औषध","कोणती औषधे","कुठली औषधे","औषधांची यादी","मेरी दवा","मेरी दवाएं","मेरी दवाइयां","दवाओं की सूची","कौन सी दवाइयां","कौन सी दवा")
+    if any(term in text for term in medicine_list_terms): return "list_medicines",False
+    today_terms=("today's dose","today’s dose","today's schedule","today’s schedule","what is due today","today's medicines","आजचा दिनक्रम","आजचे औषध","आज कोणती मात्रा","आजची औषधे","आजच्या मात्रा","आज कोणती औषधे","आज की दवा","आज कौन सी दवा","आज की खुराक")
+    if any(term in text for term in today_terms): return "today_schedule",False
+    missed_terms=("missed dose","forgot dose","forgot to take","छूटी हुई खुराक","खुराक छूट","दवा लेना भूल","गोली लेना भूल","मात्रा चुक","औषध घ्यायला विसर","डोस चुक")
+    if any(term in text for term in missed_terms): return "missed",False
+    safety_terms=("side effect","side effects","interaction","allergy","dizzy","dizziness","nausea","दुष्प्रभाव","साइड इफेक्ट","एलर्जी","दुष्परिणाम","परस्परक्रिया","औषधामुळे त्रास","अॅलर्जी","चक्कर","मळमळ","अस्वस्थ")
+    if any(term in text for term in safety_terms): return "medicine_safety",False
+    prescription_terms=("prescription","scan","upload","पर्चा","नुस्खा","स्कैन","अपलोड","प्रिस्क्रिप्शन")
+    if any(term in text for term in prescription_terms): return "prescription",False
+    appointment_terms=("appointment","follow-up","doctor visit","भेंट","मुलाक़ात","डॉक्टर की मुलाक़ात","भेटीची वेळ","डॉक्टरची भेट","पुढील भेट")
+    if any(term in text for term in appointment_terms): return "appointment",False
+    record_terms=("mark as taken","record dose","log dose","खुराक दर्ज","ली गई दर्ज","मात्रा नोंद","मात्रा घेतली","नोंद करा","गोळी घेतली")
+    if any(term in text for term in record_terms): return "record",False
+    add_medicine_terms=("add medicine","add a medicine","औषध जोडा","दवा जोड़","गोली जोड़","नवी औषधे","औषध कसे जोड","दवा कैसे जोड़")
+    if any(term in text for term in add_medicine_terms): return "add_medicine",False
+    tracking_terms=("medicine","medication","reminder","dose","schedule","दवा","दवाई","गोली","खुराक","रिमाइंडर","औषध","मात्रा","स्मरणपत्र")
+    if any(term in text for term in tracking_terms): return "tracking",False
+    greeting_terms=("hello","hi","hey","नमस्ते","नमस्कार","हाय","हॅलो","कसे आहात","कैसे हो")
+    if any(term in text for term in greeting_terms): return "greeting",False
+    return "general",False
+
+@app.get("/api/chat/history")
+def chat_history(request:Request):
+    with store.connection() as db:
+        rows=db.execute("SELECT id,role,message,created_at FROM chat_messages WHERE user_id=? ORDER BY id",(request.state.user["id"],)).fetchall()
+        return [rowdict(r) for r in rows]
+
 @app.post("/api/chat")
-def chat(payload:ChatIn):
-    message=payload.message.lower()
-    urgent=any(x in message for x in ("chest pain","can't breathe","cannot breathe","difficulty breathing","shortness of breath","overdose","suicid","unconscious","severe allergic","allergic reaction","seizure","stroke","heavy bleeding"))
-    if urgent:
-        return {"reply":"This may be an emergency. Contact your local emergency services or a qualified healthcare professional now. I cannot assess emergencies or provide treatment instructions.","urgent":True,"medical_advice":False}
-    return {"reply":"I can help with general medication tracking, but I cannot diagnose conditions, recommend doses, or change a prescription. Check the prescription label and contact your doctor or pharmacist if anything is unclear.","urgent":False,"medical_advice":False}
+def chat(payload:ChatIn,request:Request):
+    language=request.state.user.get("language","en")
+    if language not in CHAT_REPLIES: language="en"
+    intent,urgent=_chat_reply(payload.message,language)
+    user_id=request.state.user["id"]
+    with store.connection() as db:
+        patients=_chat_patients(db,request.state.user,payload.patient_id)
+        matched_medicine=_chat_find_medicine(db,payload.message,patients)
+        if matched_medicine and intent in {"general","tracking"}: intent="medicine_info"
+        turn=db.execute("SELECT COUNT(*) AS n FROM chat_messages WHERE user_id=? AND role='assistant'",(user_id,)).fetchone()["n"]
+        if intent in {"list_medicines","today_schedule","missed_summary"}:
+            reply=_chat_data_reply(db,intent,patients,language,matched_medicine)
+        elif intent=="medicine_info":
+            reply=_chat_data_reply(db,intent,patients,language,matched_medicine)
+        elif intent=="general":
+            reply=CHAT_CLARIFY[language]
+        else:
+            options=[CHAT_REPLIES[language][intent],*CHAT_ALTERNATES.get(language,{}).get(intent,[])]
+            reply=options[turn%len(options)]
+        db.execute("INSERT INTO chat_messages(user_id,role,message) VALUES(?, 'user', ?)",(user_id,payload.message))
+        db.execute("INSERT INTO chat_messages(user_id,role,message) VALUES(?, 'assistant', ?)",(user_id,reply))
+    return {"reply":reply,"urgent":urgent,"medical_advice":False}
 
 @app.get("/api/rxnorm")
 def rxnorm_lookup(name:str=Query(min_length=1,max_length=120)):

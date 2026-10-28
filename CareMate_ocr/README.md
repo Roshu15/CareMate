@@ -19,7 +19,7 @@ cd CareMate_ocr
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:OCR_SPACE_API_KEY = "your-ocr.space-api-key"
+$env:OCR_SPACE_API_KEY = "K82343367488957"
 uvicorn app:app --reload
 ```
 
@@ -47,7 +47,7 @@ Both registration and login return `access_token`. A Caretaker account represent
 - Medicines: `POST/GET /api/patients/{id}/medicines`, `PATCH/DELETE /api/medicines/{id}`. Reminder times use 24-hour `HH:MM`.
 - Schedule and adherence: `GET /api/patients/{id}/schedule?on=YYYY-MM-DD`, `POST /api/medicines/{id}/doses`, `GET /api/patients/{id}/doses`, `GET /api/patients/{id}/reports/adherence`.
 - Follow-ups and custom reminders: `POST/GET /api/patients/{id}/appointments`, `PATCH/DELETE /api/appointments/{id}`, `POST/GET /api/patients/{id}/reminders`, `PATCH/DELETE /api/reminders/{id}`.
-- Notifications and support: `GET /api/notifications`, `PATCH /api/notifications/{id}/read`, `POST /api/contact`, `POST /api/chat`, `GET /api/rxnorm?name=...`.
+- Notifications and support: `GET /api/notifications`, `PATCH /api/notifications/{id}/read`, `POST /api/contact`, `GET /api/chat/history`, `POST /api/chat`, `GET /api/rxnorm?name=...`. Chat history is private to the signed-in account and assistant replies use its saved English, Hindi, or Marathi preference.
 
 ## Medication plan example
 
