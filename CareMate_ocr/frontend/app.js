@@ -5,6 +5,8 @@ const state = {
   appointments: [], reminders: [], prescriptions: [], caregivers: [], unreadOpen: false,
   caregiverRequests: [], chatMessages: [], seenNotificationIds: new Set(), alertedDoseKeys: new Set(),
   authMode: 'login', authError: '', ocr: null, ocrFileName: '', loading: false,
+  alarmEnabled: localStorage.getItem('caremate_alarm_enabled')==='true',
+  pushEnabled: false, pushPublicKey: '',
   publicPage: 'landing', theme: localStorage.getItem('caremate_theme')||'light',
 };
 
@@ -41,6 +43,34 @@ function localDate(){const d=new Date();return `${d.getFullYear()}-${String(d.ge
 function humanDate(value, opts={month:'short',day:'numeric'}) { if(!value)return '—'; const text=String(value);const d=new Date(/^\d{4}-\d\d-\d\d$/.test(text)?`${text}T12:00:00`:text); return isNaN(d)?esc(value):d.toLocaleDateString(undefined,opts); }
 function humanTime(value) { if(!value)return ''; const [h,m]=String(value).split(':').map(Number); if(Number.isNaN(h))return value; const d=new Date(); d.setHours(h,m||0,0,0); return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}); }
 function toast(message, error=false) { const el=document.createElement('div'); el.className=`toast${error?' error':''}`; el.textContent=tr(message); document.querySelector('#toast-region').append(el); setTimeout(()=>el.remove(),3800); }
+
+let alarmAudio=null, alarmInterval=null, alarmStopTimer=null;
+function playAlarmTone(){
+  try{
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+    if(!AudioContextClass)return;
+    alarmAudio ||= new AudioContextClass();
+    if(alarmAudio.state==='suspended')alarmAudio.resume();
+    const now=alarmAudio.currentTime;
+    [0,0.28].forEach(offset=>{
+      const oscillator=alarmAudio.createOscillator(), gain=alarmAudio.createGain();
+      oscillator.type='sine';oscillator.frequency.value=880;
+      gain.gain.setValueAtTime(0.0001,now+offset);
+      gain.gain.exponentialRampToValueAtTime(0.16,now+offset+0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001,now+offset+0.24);
+      oscillator.connect(gain);gain.connect(alarmAudio.destination);
+      oscillator.start(now+offset);oscillator.stop(now+offset+0.25);
+    });
+  }catch(error){console.warn('Alarm sound could not play.',error);}
+}
+function stopAlarm(){if(alarmInterval){clearInterval(alarmInterval);alarmInterval=null;}if(alarmStopTimer){clearTimeout(alarmStopTimer);alarmStopTimer=null;}}
+function startAlarm(){
+  if(!state.alarmEnabled)return;
+  stopAlarm();playAlarmTone();
+  alarmInterval=setInterval(playAlarmTone,1900);
+  alarmStopTimer=setTimeout(stopAlarm,9000);
+}
+function decodePushKey(value){const padding='='.repeat((4-value.length%4)%4);const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(raw,char=>char.charCodeAt(0));}
 
 async function api(path, options={}) {
   const headers = new Headers(options.headers || {});
@@ -126,8 +156,11 @@ function renderContact(){return `${pageHeading('We’re here to help','Get in to
 function renderNotifications(popover=false){
   const permission=('Notification' in window)?Notification.permission:'unsupported';
   const notifications=visibleNotifications();
-  if(!notifications.length)return `<div class="empty-state" style="padding:22px 8px"><strong>You're all caught up</strong><p>New reminders will appear here.</p></div>${popover&&permission==='default'?'<button class="button button-secondary button-small" data-action="enable-browser-alerts">Enable desktop alerts</button>':''}`;
-  return `<div class="notification-list">${notifications.slice(0,popover?5:30).map(n=>`<article class="notification-item ${n.read?'':'unread'}"><span class="notification-bead"></span><div><div class="notification-title">${esc(n.title)}</div><div class="notification-body">${esc(n.body)}</div><button class="button button-quiet button-small" data-action="read-notification" data-id="${n.id}">Mark read</button>${n.kind==='medicine'?`<button class="button button-quiet button-small" data-action="read-aloud" data-text="${esc(`${n.title}. ${n.body}`)}">Read aloud</button>`:''}</div><div class="notification-time">${n.read?'':'New'}</div></article>`).join('')}</div>${popover&&permission==='default'?'<button class="button button-secondary button-small" data-action="enable-browser-alerts">Enable desktop alerts</button>':''}${popover?'<button class="button button-quiet button-small" data-action="navigate" data-view="overview">Close</button>':''}`;
+  const soundControl=popover?`<button class="button button-secondary button-small" data-action="toggle-alarm-sound">${state.alarmEnabled?'Turn alarm sound off':'Turn alarm sound on'}</button>`:'';
+  const pushSupported='serviceWorker'in navigator&&'PushManager'in window&&window.isSecureContext;
+  const pushControl=popover?(state.pushEnabled?'<button class="button button-secondary button-small" data-action="disable-background-alerts">Disable alerts when app is closed</button>':state.pushPublicKey&&pushSupported?'<button class="button button-secondary button-small" data-action="enable-background-alerts">Enable alerts when app is closed</button>':`<div class="muted" style="font-size:.72rem;padding:4px 8px">${pushSupported?'Background alerts need server setup.':'Background alerts are not supported in this browser.'}</div>`):'';
+  if(!notifications.length)return `<div class="empty-state" style="padding:22px 8px"><strong>You're all caught up</strong><p>New reminders will appear here.</p></div>${soundControl}${pushControl}${popover&&permission==='default'?'<button class="button button-secondary button-small" data-action="enable-browser-alerts">Enable desktop alerts</button>':''}`;
+  return `<div class="notification-list">${notifications.slice(0,popover?5:30).map(n=>`<article class="notification-item ${n.read?'':'unread'}"><span class="notification-bead"></span><div><div class="notification-title">${esc(n.title)}</div><div class="notification-body">${esc(n.body)}</div><button class="button button-quiet button-small" data-action="read-notification" data-id="${n.id}">Mark read</button>${n.kind==='medicine'?`<button class="button button-quiet button-small" data-action="read-aloud" data-text="${esc(`${n.title}. ${n.body}`)}">Read aloud</button>`:''}</div><div class="notification-time">${n.read?'':'New'}</div></article>`).join('')}</div>${soundControl}${pushControl}${popover&&permission==='default'?'<button class="button button-secondary button-small" data-action="enable-browser-alerts">Enable desktop alerts</button>':''}${popover?'<button class="button button-quiet button-small" data-action="navigate" data-view="overview">Close</button>':''}`;
 }
 function visibleNotifications(){return state.user?.role==='caregiver'?state.notifications.filter(n=>n.kind==='missed_dose'):state.notifications;}
 
@@ -151,6 +184,8 @@ async function loadWorkspace(){
   state.loading=true;
   try{
     state.user=await api('/api/auth/me');
+    try{state.pushPublicKey=(await api('/api/push/public-key')).public_key||'';}catch{state.pushPublicKey='';}
+    try{const registration=await navigator.serviceWorker?.ready;state.pushEnabled=!!(await registration?.pushManager?.getSubscription());}catch{state.pushEnabled=false;}
     state.patients=await api('/api/patients');
     state.caregivers=[];
     state.caregiverRequests=await api('/api/caregiver-requests');
@@ -174,7 +209,7 @@ async function loadPatientData(){
 }
 async function refresh(){try{state.patients=await api('/api/patients');state.caregiverRequests=await api('/api/caregiver-requests');if(state.patient&&!state.patients.some(p=>p.id===state.patient.id))state.patient=null;if(state.patient)state.patient=state.patients.find(p=>p.id===state.patient.id)||state.patient;await loadPatientData();state.notifications=await api('/api/notifications?unread_only=true');render();}catch(e){toast(e.message,true);}}
 
-async function pollNotifications(){const items=await api('/api/notifications?unread_only=true');const relevant=state.user?.role==='caregiver'?items.filter(n=>n.kind==='missed_dose'):items;const fresh=relevant.filter(n=>!state.seenNotificationIds.has(n.id));state.notifications=items;state.caregiverRequests=await api('/api/caregiver-requests');for(const item of fresh){state.seenNotificationIds.add(item.id);toast(`${item.title}: ${item.body}`);if('Notification'in window&&Notification.permission==='granted'){const notice=new Notification(tr(item.title),{body:tr(item.body),tag:`caremate-${item.id}`});notice.onclick=()=>window.focus();}}}
+async function pollNotifications(){const items=await api('/api/notifications?unread_only=true');const relevant=state.user?.role==='caregiver'?items.filter(n=>n.kind==='missed_dose'):items;const fresh=relevant.filter(n=>!state.seenNotificationIds.has(n.id));state.notifications=items;state.caregiverRequests=await api('/api/caregiver-requests');for(const item of fresh){state.seenNotificationIds.add(item.id);toast(`${item.title}: ${item.body}`);if(!state.pushEnabled&&'Notification'in window&&Notification.permission==='granted'){const notice=new Notification(tr(item.title),{body:tr(item.body),tag:`caremate-${item.id}`});notice.onclick=()=>window.focus();}}if(fresh.length)startAlarm();}
 
 async function uploadPrescription(file){if(!file)return;if(file.size>10*1024*1024){toast('Choose an image under 10 MB.',true);return;}if(!state.patient){toast('Add or choose a patient first.',true);return;}const box=document.querySelector('#upload-box');if(box)box.innerHTML='<div class="spinner" style="margin:auto"></div><p>Reading the image… this can take a moment.</p>';try{const data=await api(`/api/patients/${state.patient.id}/prescriptions/ocr`,{method:'POST',body:(()=>{const f=new FormData();f.append('image',file);return f;})()});state.ocr=data;state.ocrFileName=file.name;render();toast('Text extracted. Please review every detail.');}catch(e){toast(e.message,true);render();}}
 
@@ -195,6 +230,20 @@ root.addEventListener('click',async event=>{
     if(action==='toggle-menu')document.querySelector('#sidebar')?.classList.toggle('open');
     if(action==='toggle-notifications'){state.unreadOpen=!state.unreadOpen;render();}
     if(action==='enable-browser-alerts'){if(!('Notification'in window)){toast('This browser does not support desktop notifications.',true);}else{const permission=await Notification.requestPermission();toast(permission==='granted'?'Desktop alerts are enabled while CareMate is open.':'Desktop alerts were not enabled.',permission!=='granted');render();}}
+    if(action==='enable-background-alerts'){
+      if(!state.pushPublicKey){toast('Background alerts need VAPID keys configured on the server.',true);return;}
+      if(!('Notification'in window)||!('serviceWorker'in navigator)||!('PushManager'in window)||!window.isSecureContext){toast('This browser does not support background alerts. Open the installed app over HTTPS.',true);return;}
+      const permission=await Notification.requestPermission();if(permission!=='granted'){toast('Allow notifications in your device settings to receive background alerts.',true);return;}
+      const registration=await navigator.serviceWorker.ready;
+      const subscription=await registration.pushManager.getSubscription()||await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodePushKey(state.pushPublicKey)});
+      await api('/api/push/subscribe',json('POST',subscription.toJSON()));state.pushEnabled=true;toast('Background alerts are enabled on this device.');render();
+    }
+    if(action==='disable-background-alerts'){
+      const registration=await navigator.serviceWorker.ready,subscription=await registration.pushManager.getSubscription();
+      if(subscription){await api('/api/push/unsubscribe',json('POST',{endpoint:subscription.endpoint}));await subscription.unsubscribe();}
+      state.pushEnabled=false;toast('Background alerts are disabled on this device.');render();
+    }
+    if(action==='toggle-alarm-sound'){state.alarmEnabled=!state.alarmEnabled;localStorage.setItem('caremate_alarm_enabled',String(state.alarmEnabled));if(state.alarmEnabled){playAlarmTone();toast('Alarm sound is on. You’ll hear it for new alerts while CareMate is open.');}else{stopAlarm();toast('Alarm sound is off.');}render();}
     if(action==='caregiver-decision'){await api(`/api/caregiver-requests/${actionEl.dataset.id}`,json('PATCH',{status:actionEl.dataset.status}));await refresh();toast(`Caregiver request ${actionEl.dataset.status}.`);}
     if(action==='signout')signOut();
     if(action==='open-modal'){state.modal=actionEl.dataset.modal;render();}
@@ -243,6 +292,6 @@ root.addEventListener('submit',async event=>{
 
 function exportReport(){if(!state.report)return;const r=state.report;const lines=[`CareMate report — ${state.patient?.name||''}`,`Period: ${r.period.start} to ${r.period.end}`,`Overall adherence: ${r.overall_adherence_percent??'No data'}%`,`Taken: ${r.total_taken}`,`Missed: ${r.total_missed}`,'','Medicine,Taken,Missed,Adherence %,Days left,Quantity left',...r.medicines.map(m=>[m.medicine_name,m.taken,m.missed,m.adherence_percent??'',m.remaining_days??'',m.remaining_quantity??''].map(x=>`"${String(x).replaceAll('"','""')}"`).join(','))];const blob=new Blob([lines.join('\n')],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`caremate-${(state.patient?.name||'report').toLowerCase().replace(/[^a-z0-9]+/g,'-')}.csv`;a.click();URL.revokeObjectURL(a.href);}
 
-function startPolling(){if(pollTimer)return;pollTimer=setInterval(async()=>{if(state.token){try{await pollNotifications();await loadPatientData();const cutoff=(()=>{const n=new Date();return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`;})();for(const dose of state.schedule.filter(x=>x.status==='pending'&&x.scheduled_date===localDate()&&x.scheduled_time<=cutoff)){const key=`${dose.medicine_id}:${dose.scheduled_date}:${dose.scheduled_time}`;if(!state.alertedDoseKeys.has(key)){state.alertedDoseKeys.add(key);if('Notification'in window&&Notification.permission==='granted')new Notification('CareMate: time for medicine',{body:`${dose.medicine_name}${dose.dose?` (${dose.dose})`:''} · ${humanTime(dose.scheduled_time)}`});}}const focused=document.activeElement?.matches('input,textarea,select');if(!focused&&!state.modal)render();}catch(e){console.warn(e);}}},25000);}
+function startPolling(){if(pollTimer)return;pollTimer=setInterval(async()=>{if(state.token){try{await pollNotifications();await loadPatientData();const cutoff=(()=>{const n=new Date();return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`;})();let doseBecameDue=false;for(const dose of state.schedule.filter(x=>x.status==='pending'&&x.scheduled_date===localDate()&&x.scheduled_time<=cutoff)){const key=`${dose.medicine_id}:${dose.scheduled_date}:${dose.scheduled_time}`;if(!state.alertedDoseKeys.has(key)){state.alertedDoseKeys.add(key);doseBecameDue=true;if(!state.pushEnabled&&'Notification'in window&&Notification.permission==='granted')new Notification('CareMate: time for medicine',{body:`${dose.medicine_name}${dose.dose?` (${dose.dose})`:''} · ${humanTime(dose.scheduled_time)}`});}}if(doseBecameDue)startAlarm();const focused=document.activeElement?.matches('input,textarea,select');if(!focused&&!state.modal)render();}catch(e){console.warn(e);}}},25000);}
 async function start(){applyTheme();if(!state.token){renderLanding();return;}showLoading();await loadWorkspace();startPolling();}
 start();

@@ -115,6 +115,8 @@ async def run_reminder_worker():
     while True:
         try:
             await asyncio.to_thread(process_due_items)
+            from .push_notifications import send_pending_pushes
+            await asyncio.to_thread(send_pending_pushes)
         except asyncio.CancelledError:
             raise
         except Exception:

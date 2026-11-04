@@ -10,6 +10,7 @@ caremate.db
 .env
 .env.*
 !.env.example
+.local_vapid_keys.json
 
 # SQLite transient files
 *.db-shm

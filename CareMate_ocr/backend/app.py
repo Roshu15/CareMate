@@ -17,6 +17,7 @@ from .ocr import extract_text
 from .schedule_generation import generate_schedule
 from .security import auth_middleware, hash_password, new_session, verify_password
 from .reminder_worker import run_reminder_worker, _notify, DOSE_GRACE_MINUTES
+from .push_notifications import vapid_public_key
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -46,6 +47,10 @@ class UserIn(BaseModel):
 class LoginIn(BaseModel):
     email: str
     password: str
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=4096)
+    keys: dict[str, str]
 
 class ChangePasswordIn(BaseModel):
     current_password: str
@@ -558,6 +563,38 @@ def list_notifications(request:Request,patient_id:Optional[int]=None,unread_only
             enforce_patient_access(db,user,patient_id)
         rows=db.execute("SELECT * FROM notifications WHERE user_id=? AND (? IS NULL OR patient_id=?) AND (?=0 OR read=0) ORDER BY created_at DESC",(user["id"],patient_id,patient_id,int(unread_only))).fetchall()
         return [rowdict(r) for r in rows]
+
+@app.get("/api/push/public-key")
+def push_public_key():
+    key=vapid_public_key()
+    if not key: raise HTTPException(503,"Background alerts are not configured on this server")
+    return {"public_key":key}
+
+@app.post("/api/push/subscribe",status_code=201)
+def subscribe_push(payload:PushSubscriptionIn,request:Request):
+    if not vapid_public_key(): raise HTTPException(503,"Background alerts are not configured on this server")
+    from urllib.parse import urlparse
+    parsed=urlparse(payload.endpoint)
+    allowed_hosts=("fcm.googleapis.com","push.services.mozilla.com","web.push.apple.com","notify.windows.com")
+    host=(parsed.hostname or "").lower()
+    if parsed.scheme!="https" or not any(host==suffix or host.endswith("."+suffix) for suffix in allowed_hosts):
+        raise HTTPException(422,"Unsupported push service endpoint")
+    p256dh=payload.keys.get("p256dh"); auth=payload.keys.get("auth")
+    if not p256dh or not auth: raise HTTPException(422,"Push subscription keys are missing")
+    user=request.state.user
+    with store.connection() as db:
+        db.execute("INSERT INTO push_subscriptions(endpoint,user_id,p256dh,auth) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,created_at=CURRENT_TIMESTAMP",
+                   (payload.endpoint,user["id"],p256dh,auth))
+        db.execute("UPDATE notifications SET push_sent=1 WHERE user_id=? AND push_sent=0",(user["id"],))
+    return {"subscribed":True}
+
+@app.post("/api/push/unsubscribe",status_code=204)
+def unsubscribe_push(payload:dict,request:Request):
+    endpoint=payload.get("endpoint") if isinstance(payload,dict) else None
+    if not endpoint: raise HTTPException(422,"Push subscription endpoint is required")
+    with store.connection() as db:
+        db.execute("DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?",(endpoint,request.state.user["id"]))
+    return None
 
 @app.patch("/api/notifications/{notification_id}/read")
 def mark_notification_read(notification_id:int):
