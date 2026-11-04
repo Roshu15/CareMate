@@ -1653,3 +1653,48 @@ html[data-theme="dark"] .chat-form .input:focus { border-color: #76a887; box-sha
   height: 19px;
   display: block;
 }
+
+@media (max-width: 760px) {
+  .sidebar {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .top-left {
+    flex: 1;
+    min-width: 0;
+  }
+  .top-left > div {
+    min-width: 0;
+  }
+  .page-title {
+    max-width: calc(100vw - 136px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .schedule-item {
+    grid-template-columns: 48px 9px minmax(0, 1fr);
+  }
+  .schedule-item > .dose-actions,
+  .schedule-item > .status-pill {
+    grid-column: 3;
+    justify-self: start;
+  }
+  .care-patient-info {
+    min-width: 0;
+  }
+  .care-patient-name,
+  .care-patient-meta,
+  .chat-bubble {
+    overflow-wrap: anywhere;
+  }
+  .form-actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 390px) {
+  .schedule-item {
+    grid-template-columns: 44px 8px minmax(0, 1fr);
+  }
+}
