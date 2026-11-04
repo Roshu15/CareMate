@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: caremate
+    runtime: python
+    plan: free
+    rootDir: CareMate_ocr
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: CAREMATE_DB
+        value: /tmp/caremate.db
+      - key: OCR_SPACE_API_KEY
+        sync: false

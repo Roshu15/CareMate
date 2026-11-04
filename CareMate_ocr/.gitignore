@@ -3,6 +3,9 @@
 __pycache__/
 *.py[cod]
 
+# Keep local patient and account data out of deployment repositories.
+caremate.db
+
 # Local environment variables / credentials
 .env
 .env.*

@@ -19,7 +19,7 @@ cd CareMate_ocr
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:OCR_SPACE_API_KEY = "K82343367488957"
+$env:OCR_SPACE_API_KEY = "your-ocr-space-api-key"
 uvicorn app:app --reload
 ```
 
@@ -71,3 +71,9 @@ If reminder times are omitted and a common `1-0-1`-style frequency is recognized
 OCR uses OCR.space and requires `OCR_SPACE_API_KEY`. OCR and medicine-name correction can be wrong; extracted values always require human review, and OCR never creates a medication plan by itself. The chatbot gives conservative safety guidance and does not diagnose or recommend doses. Refill quantities and days remaining are estimates based on entered quantity, duration, and reminders per day.
 
 The background worker writes medication reminders, missed-dose records, refill alerts, custom reminders, and appointment reminders to the in-app notification table. With the web app open, it polls for alerts and can show browser notifications after the user enables them from the bell menu. Reminder delivery depends on the API process running; this app does not send push notifications while closed, SMS, or email. Browser speech can read medication alerts aloud on request. Language preference is stored; translated interface text is still being added. Before real patient data is used, deploy behind HTTPS, configure private backups and secret management, and add operational rate limiting. Accounts created by the old prototype without a password hash cannot log in; register a new account.
+
+## Render demo deployment
+
+The `render.yaml` Blueprint defines a free demo web service. Connect this repository in Render and select the root `render.yaml` Blueprint. Add a newly rotated OCR.space key as the `OCR_SPACE_API_KEY` secret in Render; do not commit it to the repository.
+
+This demo stores SQLite data at `/tmp/caremate.db`. Render's free web services can spin down and lose local filesystem data, so use only fictional demo accounts and records. This deployment is not configured for real patient data.
